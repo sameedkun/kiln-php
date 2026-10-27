@@ -1,0 +1,132 @@
+name: Build PHP
+
+# Static PHP for Kiln on Linux (Kiln ADR 0025): static-php-cli's `common` recipe plus mysqli,
+# intl, sodium and opcache. Runs on demand; a run with `release` set publishes the archives,
+# their checksums and the licences of everything linked into them as a GitHub release.
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Release tag to publish (e.g. 2026-10-27); empty = build only"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # static-php-cli, pinned to a commit so a build can be repeated (v3 branch, 2026-10-27).
+  SPC_REPO: crazywhalecc/static-php-cli
+  SPC_REF: 7bc4586e399d735ab724d836eb4db7bc2d3fde64
+  EXTENSIONS: bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gmp,iconv,intl,xml,mbstring,mbregex,mysqli,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_sqlite,pdo_pgsql,pgsql,phar,posix,redis,session,simplexml,soap,sockets,sodium,sqlite3,tokenizer,xmlwriter,xmlreader,zlib,zip
+
+jobs:
+  build:
+    name: PHP ${{ matrix.php }} (linux-x86_64)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.2", "8.3", "8.4", "8.5"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SPC_REPO }}
+          ref: ${{ env.SPC_REF }}
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer
+          extensions: curl, openssl, mbstring, filter
+          ini-values: memory_limit=-1
+
+      - run: composer install -q --no-interaction --no-scripts --no-progress --prefer-dist --no-dev
+
+      - run: bin/spc doctor --auto-fix
+
+      - name: Build
+        run: |
+          # Exit code 75 is a download error; retry those, fail on anything else.
+          for attempt in 1 2 3; do
+            if bin/spc build --build-cli --build-fpm "$EXTENSIONS" --with-suggests \
+                --dl-with-php="${{ matrix.php }}" --dl-retry=5 --dl-prefer-binary; then
+              exit 0
+            else
+              code=$?
+            fi
+            [ "$code" -ne 75 ] && exit "$code"
+            echo "::warning::download error on attempt $attempt; retrying"
+            sleep 30
+          done
+          exit 75
+
+      - name: Check
+        run: |
+          php=buildroot/bin/php
+          "$php" -v
+          "$php" -m > modules.txt
+          for ext in mysqli mysqlnd pdo_sqlite pdo_mysql pdo_pgsql intl sodium openssl curl zip gd mbstring; do
+            grep -qix "$ext" modules.txt || { echo "::error::missing extension $ext"; exit 1; }
+          done
+          grep -qx "Zend OPcache" modules.txt || { echo "::error::missing OPcache"; exit 1; }
+          buildroot/bin/php-fpm -v
+
+      - name: Pack
+        run: |
+          version=$(buildroot/bin/php -r 'echo PHP_VERSION;')
+          mkdir -p dist
+          tar -czf "dist/php-$version-cli-linux-x86_64.tar.gz" -C buildroot/bin php
+          tar -czf "dist/php-$version-fpm-linux-x86_64.tar.gz" -C buildroot/bin php-fpm
+          tar -czf "dist/php-$version-licenses.tar.gz" -C buildroot license
+          cp modules.txt "dist/php-$version-modules.txt"
+          cd dist
+          for f in *.tar.gz; do sha256sum "$f" > "$f.sha256"; done
+          sha256sum -c --strict ./*.sha256
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: php-${{ matrix.php }}
+          path: dist/*
+          if-no-files-found: error
+
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spc-logs-${{ matrix.php }}
+          path: log/*.log
+          if-no-files-found: ignore
+
+  release:
+    name: Publish ${{ inputs.release }}
+    needs: build
+    if: inputs.release != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          {
+            echo "Static PHP for Kiln on Linux (x86-64), built with static-php-cli $SPC_REF."
+            echo
+            echo "Extensions: $EXTENSIONS"
+            echo
+            echo "SHA-256:"
+            echo '```'
+            cat ./*.sha256
+            echo '```'
+            echo
+            echo "Each php-<version>-licenses.tar.gz holds the licences of PHP and every library linked into that version."
+          } > notes.md
+          gh release create "${{ inputs.release }}" --repo "$GITHUB_REPOSITORY" \
+            --title "PHP builds ${{ inputs.release }}" --notes-file notes.md \
+            ./*.tar.gz ./*.sha256 ./*-modules.txt
