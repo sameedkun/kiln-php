@@ -50,6 +50,10 @@ jobs:
       - run: bin/spc doctor --auto-fix
 
       - name: Build
+        env:
+          # static-php-cli downloads some sources through the GitHub API; unauthenticated, four
+          # parallel jobs can hit its rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           # Exit code 75 is a download error; retry those, fail on anything else.
           for attempt in 1 2 3; do
