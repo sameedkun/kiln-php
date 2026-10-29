@@ -5,7 +5,9 @@ open-source local PHP development environment.
 
 Each release has:
 
-- PHP 8.2, 8.3, 8.4 and 8.5, CLI and FPM, for x86-64 Linux.
+- PHP CLI and FPM builds for x86-64 Linux: the newest patch of 8.2, 8.3, 8.4 and 8.5, or
+  exact earlier patches (Kiln keeps the previous patch of each line installable, so updates
+  can be rolled back).
 - A `.sha256` file for each archive.
 - The licences of PHP and every library linked into each build.
 
@@ -29,7 +31,8 @@ matches the one pinned in Kiln's source. Why Kiln builds its own PHP is in Kiln'
 ## Building
 
 Run the **Build PHP** workflow. To publish the result, give it a release tag such as
-`2026-10-27`.
+`2026-10-27`. By default it builds the newest patch of each line; `versions` takes a JSON
+list of minors or exact patches instead, such as `["8.4.26"]`.
 
 ## Licence
 
